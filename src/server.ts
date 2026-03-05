@@ -1,475 +1,111 @@
-import cors from "cors";
-import express from "express";
-import { Bot } from "@maxhub/max-bot-api";
-import { createHash, randomUUID } from "crypto";
-import jwt from "jsonwebtoken";
-import { MongoClient, ObjectId } from "mongodb";
-import { z } from "zod";
-import { loadConfig } from "./config.js";
-import { validateMaxInitData } from "./maxAuth.js";
-import { createManageRouter, type ChannelConnectionDoc, type GiveawayDoc as ManageGiveawayDoc } from "./routes/manage.js";
-import {
-  createProfileRouter,
-  type GiveawayTicketDoc as ProfileTicketDoc,
-  type GiveawayDoc as ProfileGiveawayDoc,
-  type ParticipantDoc as ProfileParticipantDoc,
-} from "./routes/profile.js";
+import express from 'express';
 
-type CheckParticipantDoc = ProfileParticipantDoc & {
-  referredByUserId?: number;
-  subscribedToChannel?: boolean;
-  qualificationStatus?: "pending_subscription" | "pending_referrals" | "qualified";
-};
+import { loadConfig } from './config/index.js';
+import { ConnectMongoDB, CloseMongoDB } from './db/mongodb.js';
+import { CreateIndexes } from './db/indexes.js';
+import { AuthMiddleware } from './middleware/auth.middleware.js';
+import { CorsMiddleware } from './middleware/cors.middleware.js';
+import { ErrorMiddleware } from './middleware/error.middleware.js';
+import { AuthRoutes } from './api/auth/auth.routes.js';
+import { GiveawayRoutes } from './api/giveaways/giveaway.routes.js';
+import { FilesRoutes } from './api/files/files.routes.js';
+import { ManageRoutes } from './api/manage/manage.routes.js';
+import { ProfileRoutes } from './api/profile/profile.routes.js';
+import { UserRoutes } from './api/profile/user.routes.js';
 
-type CheckGiveawayDoc = ManageGiveawayDoc;
-type CheckTicketDoc = ProfileTicketDoc & {
-  source?: "regular_join" | "referral_progress" | "backend_check";
-  sourceUserId?: number;
-};
+/**
+ * Главный класс сервера - отвечает только за запуск и конфигурацию Express.
+ * Вся бизнес-логика вынесена в сервисы и роуты.
+ */
+class Server {
+  private app: express.Application;
+  private config = loadConfig();
 
-const config = loadConfig();
-const app = express();
-const bot = new Bot(config.botToken);
-const mongoClient = new MongoClient(config.mongoUri);
-const db = mongoClient.db(config.mongoDbName);
-const giveawaysCollection = db.collection<CheckGiveawayDoc>("giveaways");
-const manageGiveawaysCollection = db.collection<ManageGiveawayDoc>("giveaways");
-const profileGiveawaysCollection = db.collection<ProfileGiveawayDoc>("giveaways");
-const participantsCollection = db.collection<CheckParticipantDoc>("giveaway_participants");
-const profileParticipantsCollection = db.collection<ProfileParticipantDoc>("giveaway_participants");
-const ticketsCollection = db.collection<CheckTicketDoc>("giveaway_tickets");
-const profileTicketsCollection = db.collection<ProfileTicketDoc>("giveaway_tickets");
-const channelConnectionsCollection = db.collection<ChannelConnectionDoc>("channel_connections");
+  constructor() {
+    this.app = express();
+    this.InitializeMiddlewares();
+    this.InitializeRoutes();
+    this.InitializeErrorHandling();
+  }
 
-app.use(express.json({ limit: "256kb" }));
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // Allow server-to-server or same-origin requests without Origin header.
-      if (!origin) {
-        callback(null, true);
-        return;
-      }
-      // Tuna generates random subdomains; allow them in development flow.
-      if (origin.endsWith(".ru.tuna.am")) {
-        callback(null, true);
-        return;
-      }
-      if (config.corsOrigins.includes(origin)) {
-        callback(null, true);
-        return;
-      }
-      callback(new Error(`CORS blocked for origin: ${origin}`));
-    },
-    credentials: true,
-  }),
-);
+  /**
+   * Инициализируем базовые middleware.
+   */
+  private InitializeMiddlewares(): void {
+    // Парсинг JSON с ограничением размера
+    this.app.use(express.json({ limit: '256kb' }));
 
-const authBodySchema = z.object({
-  initData: z.string().min(1),
-});
-const checkBodySchema = z.object({
-  eventId: z.string().min(1),
-  inviterId: z.number().int().positive().optional(),
-});
+    // CORS конфигурация
+    this.app.use(CorsMiddleware(this.config));
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
-});
-
-app.post("/api/auth/max", (req, res) => {
-  const parsed = authBodySchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: "bad_request",
-      details: parsed.error.flatten(),
+    // Проверка здоровья приложения
+    this.app.get('/health', (_req, res) => {
+      res.json({ ok: true });
     });
   }
 
-  try {
-    const validated = validateMaxInitData(
-      parsed.data.initData,
-      config.botToken,
-      config.authMaxAgeSeconds,
-    );
+  /**
+   * Инициализируем роуты API.
+   */
 
-    if (!validated.user?.id) {
-      return res.status(400).json({
-        error: "user_missing",
-        message: "initData has no user object",
-      });
-    }
+  private InitializeRoutes(): void {
+    // Публичные роуты (без авторизации)
+    this.app.use('/api/auth', new AuthRoutes().Router);
+    this.app.use('/api/files', new FilesRoutes().Router);
 
-    const token = jwt.sign(
-      {
-        uid: validated.user.id,
-        first_name: validated.user.first_name ?? "",
-        last_name: validated.user.last_name ?? "",
-        username: validated.user.username ?? "",
-      },
-      config.jwtSecret,
-      { expiresIn: "7d" },
-    );
-
-    return res.json({
-      token,
-      user: validated.user,
-      chat: validated.chat ?? null,
-      startParam: validated.startParam ?? null,
-      authDate: validated.authDate,
-    });
-  } catch (error) {
-    return res.status(401).json({
-      error: "unauthorized",
-      message: error instanceof Error ? error.message : "Validation failed",
-    });
-  }
-});
-
-app.get("/api/auth/me", (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith("Bearer ")
-    ? authHeader.slice("Bearer ".length)
-    : null;
-
-  if (!token) {
-    return res.status(401).json({ error: "unauthorized" });
+    // Защищенные роуты (требуют авторизации)
+    this.app.use('/api/giveaways', AuthMiddleware, new GiveawayRoutes().Router);
+    this.app.use('/api/manage', AuthMiddleware, new ManageRoutes().Router);
+    this.app.use('/api/profile', AuthMiddleware, new ProfileRoutes().Router);
+    this.app.use('/api/profile', AuthMiddleware, new UserRoutes().Router);
   }
 
-  try {
-    const payload = jwt.verify(token, config.jwtSecret);
-    return res.json({ ok: true, payload });
-  } catch {
-    return res.status(401).json({ error: "invalid_token" });
-  }
-});
-
-app.use(
-  "/api/manage",
-  createManageRouter({
-    bot,
-    jwtSecret: config.jwtSecret,
-    giveawaysCollection: manageGiveawaysCollection,
-    channelConnectionsCollection,
-  }),
-);
-
-app.use(
-  "/api/profile",
-  createProfileRouter({
-    jwtSecret: config.jwtSecret,
-    participantsCollection: profileParticipantsCollection,
-    giveawaysCollection: profileGiveawaysCollection,
-    ticketsCollection: profileTicketsCollection,
-  }),
-);
-
-async function issueBackendTickets(input: {
-  giveawayId: ObjectId;
-  userId: number;
-  desiredCount: number;
-  sourceUserId?: number;
-}) {
-  const safeDesired = Math.max(0, Math.floor(input.desiredCount));
-  const currentCount = await ticketsCollection.countDocuments({
-    giveawayId: input.giveawayId,
-    userId: input.userId,
-  });
-  const toIssue = Math.max(0, safeDesired - currentCount);
-  if (toIssue > 0) {
-    const now = new Date();
-    const docs: CheckTicketDoc[] = Array.from({ length: toIssue }, (_, index) => ({
-      giveawayId: input.giveawayId,
-      userId: input.userId,
-      ticket: createHash("sha256")
-        .update(`${input.giveawayId.toHexString()}:${input.userId}:${Date.now()}:${randomUUID()}`)
-        .digest("hex")
-        .slice(0, 12)
-        .toUpperCase(),
-      sequence: currentCount + index + 1,
-      createdAt: now,
-      source: "backend_check",
-      ...(typeof input.sourceUserId === "number" ? { sourceUserId: input.sourceUserId } : {}),
-    }));
-    await ticketsCollection.insertMany(docs, { ordered: true });
-  }
-  const latest = await ticketsCollection.findOne(
-    { giveawayId: input.giveawayId, userId: input.userId },
-    { sort: { sequence: -1 } },
-  );
-  return {
-    total: currentCount + toIssue,
-    issued: toIssue,
-    latestTicket: latest?.ticket ?? null,
-  };
-}
-
-app.post("/api/giveaways/check", async (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader?.startsWith("Bearer ")
-    ? authHeader.slice("Bearer ".length)
-    : null;
-  if (!token) {
-    return res.status(401).json({ error: "unauthorized" });
+  /**
+   * Инициализируем обработку ошибок.
+   */
+  private InitializeErrorHandling(): void {
+    this.app.use(ErrorMiddleware);
   }
 
-  const parsedBody = checkBodySchema.safeParse(req.body);
-  if (!parsedBody.success) {
-    return res.status(400).json({
-      error: "bad_request",
-      details: parsedBody.error.flatten(),
-    });
-  }
-
-  let userId: number | null = null;
-  try {
-    const decoded = jwt.verify(token, config.jwtSecret) as jwt.JwtPayload | string;
-    if (typeof decoded === "string") {
-      return res.status(401).json({ error: "invalid_token" });
-    }
-    const uid = decoded.uid;
-    if (typeof uid !== "number") {
-      return res.status(401).json({ error: "invalid_token" });
-    }
-    userId = uid;
-  } catch {
-    return res.status(401).json({ error: "invalid_token" });
-  }
-
-  if (!ObjectId.isValid(parsedBody.data.eventId)) {
-    return res.status(400).json({
-      error: "bad_event_id",
-      message: "eventId is invalid",
-    });
-  }
-  const giveawayId = new ObjectId(parsedBody.data.eventId);
-  const inviterIdFromPayload = parsedBody.data.inviterId;
-
-  const giveaway = await giveawaysCollection.findOne({ _id: giveawayId });
-  if (!giveaway) {
-    return res.status(404).json({
-      error: "not_found",
-      message: "giveaway not found",
-    });
-  }
-
-  const requiredChannels =
-    Array.isArray(giveaway.requiredChannels) && giveaway.requiredChannels.length > 0
-      ? giveaway.requiredChannels
-      : [{ channelId: giveaway.channelId }];
-
-  const channelChecks: Array<{
-    channelId: number;
-    channelTitle: string | null;
-    channelJoinLink: string | null;
-    subscribed: boolean;
-  }> = [];
-
-  for (const channel of requiredChannels) {
-    const channelId = Number(channel.channelId);
-    if (!Number.isInteger(channelId)) {
-      continue;
-    }
+  /**
+   * Запускаем сервер.
+   */
+  public async Start(): Promise<void> {
     try {
-      const members = await bot.api.getChatMembers(channelId, {
-        user_ids: [userId],
-        count: 1,
+      // Подключаемся к MongoDB и создаём индексы
+      await ConnectMongoDB(this.config.mongoUri, this.config.mongoDbName);
+      await CreateIndexes();
+
+      // Запускаем Express сервер
+      const server = this.app.listen(this.config.port, () => {
+        console.log(`[gab-backend] сервер запущен на http://localhost:${this.config.port}`);
       });
-      const subscribed = members.members.some((member) => member.user_id === userId);
-      channelChecks.push({
-        channelId,
-        channelTitle:
-          typeof channel.channelTitle === "string" ? channel.channelTitle : null,
-        channelJoinLink:
-          typeof channel.channelJoinLink === "string" ? channel.channelJoinLink : null,
-        subscribed,
-      });
-    } catch (err) {
-      console.error("giveaway_check_membership_error:", {
-        eventId: parsedBody.data.eventId,
-        userId,
-        channelId,
-        error: err,
-      });
-      return res.status(502).json({
-        error: "membership_check_failed",
-        message: `Failed to verify membership for channel ${channelId}`,
-      });
+
+      // Graceful shutdown: закрываем MongoDB при SIGTERM/SIGINT
+      const shutdown = async () => {
+        server.close();
+        await CloseMongoDB();
+        process.exit(0);
+      };
+      process.on('SIGTERM', shutdown);
+      process.on('SIGINT', shutdown);
+    } catch (error) {
+      console.error('[gab-backend] ошибка запуска сервера:', error);
+      process.exit(1);
     }
   }
-
-  const missingChannels = channelChecks.filter((item) => !item.subscribed);
-  const allChannelsSubscribed = missingChannels.length === 0;
-  let participant = await participantsCollection.findOne({ giveawayId, userId });
-  const effectiveInviterId =
-    typeof participant?.referredByUserId === "number"
-      ? participant.referredByUserId
-      : typeof inviterIdFromPayload === "number" && inviterIdFromPayload !== userId
-        ? inviterIdFromPayload
-        : undefined;
-  const baseQualificationStatus =
-    giveaway.type === "referral"
-      ? allChannelsSubscribed
-        ? "pending_referrals"
-        : "pending_subscription"
-      : allChannelsSubscribed
-        ? "qualified"
-        : "pending_subscription";
-
-  const participantUpdate = await participantsCollection.findOneAndUpdate(
-    { giveawayId, userId },
-    {
-      $setOnInsert: {
-        giveawayId,
-        userId,
-        joinedAt: new Date(),
-      },
-      $set: {
-        subscribedToChannel: allChannelsSubscribed,
-        qualificationStatus: baseQualificationStatus,
-        ...(typeof effectiveInviterId === "number" ? { referredByUserId: effectiveInviterId } : {}),
-      },
-    },
-    { upsert: true, returnDocument: "after" },
-  );
-  participant = participantUpdate ?? participant;
-  const referralRequired = Math.max(
-    1,
-    Number(giveaway.invitesPerTicket ?? giveaway.requiredInvites ?? 1),
-  );
-  const referralCompletedCount =
-    referralRequired > 0
-      ? await participantsCollection.countDocuments({
-          giveawayId,
-          referredByUserId: userId,
-          subscribedToChannel: true,
-        })
-      : 0;
-  const referralMet = giveaway.type === "referral"
-    ? referralCompletedCount >= referralRequired
-    : true;
-
-  const allConditionsMet = allChannelsSubscribed && referralMet;
-  const desiredTicketCount =
-    giveaway.type === "referral"
-      ? Math.floor(referralCompletedCount / referralRequired)
-      : allConditionsMet
-        ? 1
-        : 0;
-  const participantTicketCountBefore = await ticketsCollection.countDocuments({
-    giveawayId,
-    userId,
-  });
-  const shouldIssueOrUpdateTicket =
-    allConditionsMet &&
-    giveaway.status === "active" &&
-    desiredTicketCount > 0 &&
-    participantTicketCountBefore < desiredTicketCount;
-
-  if (shouldIssueOrUpdateTicket) {
-    await issueBackendTickets({
-      giveawayId,
-      userId,
-      desiredCount: desiredTicketCount,
-    });
-    await participantsCollection.updateOne(
-      { giveawayId, userId },
-      {
-        $set: {
-          subscribedToChannel: allChannelsSubscribed,
-          ...(giveaway.type === "referral" ? { qualificationStatus: "qualified" } : {}),
-        },
-      },
-      { upsert: true },
-    );
-    participant = await participantsCollection.findOne({ giveawayId, userId });
-  }
-
-  if (giveaway.type === "referral" && typeof effectiveInviterId === "number") {
-    const inviterCompletedCount = await participantsCollection.countDocuments({
-      giveawayId,
-      referredByUserId: effectiveInviterId,
-      subscribedToChannel: true,
-    });
-    const inviterDesiredTicketCount = Math.floor(inviterCompletedCount / referralRequired);
-    const inviter = await participantsCollection.findOne({ giveawayId, userId: effectiveInviterId });
-    const inviterCanReceiveTicket = Boolean(inviter?.subscribedToChannel);
-    if (inviterCanReceiveTicket && inviterDesiredTicketCount > 0) {
-      await issueBackendTickets({
-        giveawayId,
-        userId: effectiveInviterId,
-        desiredCount: inviterDesiredTicketCount,
-        sourceUserId: userId,
-      });
-      await participantsCollection.updateOne(
-        { giveawayId, userId: effectiveInviterId },
-        {
-          $set: {
-            qualificationStatus: "qualified",
-          },
-        },
-      );
-    }
-  }
-
-  const latestParticipantTicket = await ticketsCollection.findOne(
-    { giveawayId, userId },
-    { sort: { sequence: -1 } },
-  );
-  const participantTicketCount = await ticketsCollection.countDocuments({ giveawayId, userId });
-
-  if (giveaway.type === "referral" && allChannelsSubscribed && participantTicketCount === 0) {
-    await participantsCollection.updateOne(
-      { giveawayId, userId },
-      { $set: { qualificationStatus: "pending_referrals" } },
-    );
-    participant = await participantsCollection.findOne({ giveawayId, userId });
-  }
-
-  const botPublicName = process.env.BOT_PUBLIC_NAME ?? "id231002619995_bot";
-  const referralInviteLink =
-    giveaway.type === "referral" && allChannelsSubscribed
-      ? `https://max.ru/${botPublicName}?startapp=invite_${giveawayId.toHexString()}_${userId}`
-      : null;
-
-  return res.json({
-    eventId: parsedBody.data.eventId,
-    title: giveaway.title,
-    type: giveaway.type,
-    status: giveaway.status,
-    allConditionsMet,
-    channels: channelChecks,
-    missingChannels,
-    participant: participant
-      ? {
-          ticket: latestParticipantTicket?.ticket ?? null,
-          ticketCount: participantTicketCount,
-          joinedAt: participant.joinedAt ?? null,
-        }
-      : null,
-    referral:
-      giveaway.type === "referral"
-        ? {
-            requiredInvites: referralRequired,
-            invitesPerTicket: referralRequired,
-            completedInvites: referralCompletedCount,
-            earnedTickets: Math.floor(referralCompletedCount / referralRequired),
-            met: referralMet,
-            inviteLink: referralInviteLink,
-          }
-        : null,
-  });
-});
-
-async function bootstrap() {
-  await mongoClient.connect();
-  app.listen(config.port, () => {
-    console.log(`[max-backend] listening on http://localhost:${config.port}`);
-  });
 }
 
-bootstrap().catch((err) => {
-  console.error("[max-backend] failed to start:", err);
+/**
+ * Точка входа в приложение.
+ */
+async function Bootstrap(): Promise<void> {
+  const server = new Server();
+  await server.Start();
+}
+
+// Запускаем приложение
+Bootstrap().catch((error) => {
+  console.error('[gab-backend] критическая ошибка:', error);
   process.exit(1);
 });
-
