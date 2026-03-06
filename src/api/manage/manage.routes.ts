@@ -11,6 +11,15 @@ import {
 } from '../../db/collections.js';
 import { GiveawayDoc } from '../../types/index.js';
 
+// Безопасно достаёт eventId из req.params, приводя к строке.
+function getEventIdParam(req: Request): string {
+  const value = (req.params as unknown as { eventId?: string | string[] }).eventId;
+  if (Array.isArray(value)) {
+    return value[0] ?? '';
+  }
+  return value ?? '';
+}
+
 export type LaunchValidationError =
   | { code: 'channel_bot_not_admin'; channelId: number; channelTitle: string | null }
   | { code: 'channel_invalid_join_link'; channelId: number; channelTitle: string | null }
@@ -29,9 +38,12 @@ const channelUpdateSchema = z
 // Схема для подключения канала (вызывается ботом при событии bot_added).
 // channelId и ownerId — всё, что нужно. Название и тип канала backend получает через getChat.
 const channelConnectSchema = z.object({
-  channelId: z.number().int().refine((n) => n !== 0, {
-    message: 'channelId не должен быть 0',
-  }),
+  channelId: z
+    .number()
+    .int()
+    .refine((n) => n !== 0, {
+      message: 'channelId не должен быть 0',
+    }),
 });
 
 // Дополнительный файл: название, токен, url, filename.
@@ -244,12 +256,13 @@ function _hoursLeftUntil(isoString: string): number {
 function _buildChannelPostText(
   giveaway: GiveawayDoc,
   publicApiUrl?: string,
-  participantCount = 0
+  participantCount = 0,
 ): string {
   const lines: string[] = [];
   const title = giveaway.title ?? '';
   const description = giveaway.description ?? '';
-  const endsAtStr = typeof giveaway.endsAt === 'string' ? giveaway.endsAt : giveaway.endsAt.toISOString();
+  const endsAtStr =
+    typeof giveaway.endsAt === 'string' ? giveaway.endsAt : giveaway.endsAt.toISOString();
 
   lines.push('**' + title + '**', '', description, '', '');
 
@@ -304,10 +317,7 @@ function _buildChannelPostText(
 /**
  * Собирает вложения для поста в канал: медиа (если есть) + клавиатура.
  */
-function _buildChannelPostAttachments(
-  giveaway: GiveawayDoc,
-  botPublicName: string
-): object[] {
+function _buildChannelPostAttachments(giveaway: GiveawayDoc, botPublicName: string): object[] {
   const attachments: object[] = [];
 
   const mediaToken = giveaway.mediaToken;
@@ -397,7 +407,10 @@ export class ManageRoutes {
     this.Router.post('/giveaways/:eventId/launch', this._handleLaunchGiveaway.bind(this));
     this.Router.post('/giveaways/:eventId/stop', this._handleStopGiveaway.bind(this));
     this.Router.post('/giveaways/:eventId/finish', this._handleFinishGiveaway.bind(this));
-    this.Router.post('/giveaways/:eventId/finish-early', this._handleFinishEarlyGiveaway.bind(this));
+    this.Router.post(
+      '/giveaways/:eventId/finish-early',
+      this._handleFinishEarlyGiveaway.bind(this),
+    );
     this.Router.post('/giveaways/:eventId/restart', this._handleRestartGiveaway.bind(this));
     this.Router.post(
       '/giveaways/:eventId/refresh-channel-links',
@@ -423,14 +436,16 @@ export class ManageRoutes {
       ]);
       const botUserId = (botInfo as { user_id?: number }).user_id;
       const members =
-        (adminsResponse as {
-          members?: Array<{
-            user_id: number;
-            is_admin?: boolean;
-            is_owner?: boolean;
-            permissions?: string[] | null;
-          }>;
-        }).members ?? [];
+        (
+          adminsResponse as {
+            members?: Array<{
+              user_id: number;
+              is_admin?: boolean;
+              is_owner?: boolean;
+              permissions?: string[] | null;
+            }>;
+          }
+        ).members ?? [];
       const me = botUserId != null ? members.find((m) => m.user_id === botUserId) : undefined;
       if (!me) return false;
       const hasWrite = Array.isArray(me.permissions) && me.permissions.includes('write');
@@ -509,10 +524,8 @@ export class ManageRoutes {
       winnersCount: d.winnersCount,
       channelId: publishChannelIds[0],
       channelIds: publishChannelIds,
-      requiredInvites:
-        type === 'referral' ? Number(d.referralFriendsPerTicket ?? 1) : undefined,
-      invitesPerTicket:
-        type === 'referral' ? Number(d.referralFriendsPerTicket ?? 1) : undefined,
+      requiredInvites: type === 'referral' ? Number(d.referralFriendsPerTicket ?? 1) : undefined,
+      invitesPerTicket: type === 'referral' ? Number(d.referralFriendsPerTicket ?? 1) : undefined,
       channelJoinLink:
         type === 'referral'
           ? (requiredChannels.find((ch) => typeof ch.channelJoinLink === 'string')
@@ -611,11 +624,12 @@ export class ManageRoutes {
    */
   private _handleGetGiveaway = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    if (!ObjectId.isValid(req.params.eventId)) {
+    const eventId = getEventIdParam(req);
+    if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
     }
-    const giveawayId = new ObjectId(req.params.eventId);
+    const giveawayId = new ObjectId(eventId);
     const giveaway = await GetGiveawaysCollection().findOne({ _id: giveawayId, creatorId: userId });
     if (!giveaway) {
       res.status(404).json({ error: 'not_found', message: 'розыгрыш не найден' });
@@ -656,11 +670,12 @@ export class ManageRoutes {
    */
   private _handleUpdateGiveaway = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    if (!ObjectId.isValid(req.params.eventId)) {
+    const eventId = getEventIdParam(req);
+    if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
     }
-    const giveawayId = new ObjectId(req.params.eventId);
+    const giveawayId = new ObjectId(eventId);
     const giveaway = await GetGiveawaysCollection().findOne({
       _id: giveawayId,
       creatorId: userId,
@@ -693,7 +708,8 @@ export class ManageRoutes {
     if (d.winnersCount !== undefined) setFields.winnersCount = d.winnersCount;
     if (d.endsAt !== undefined) setFields.endsAt = new Date(d.endsAt);
     if (d.audience !== undefined) setFields.audience = d.audience;
-    if (d.referralEnabled !== undefined) setFields.type = d.referralEnabled ? 'referral' : 'regular';
+    if (d.referralEnabled !== undefined)
+      setFields.type = d.referralEnabled ? 'referral' : 'regular';
     if (d.referralFriendsPerTicket !== undefined) {
       setFields.invitesPerTicket = d.referralFriendsPerTicket;
       setFields.requiredInvites = d.referralFriendsPerTicket;
@@ -702,7 +718,8 @@ export class ManageRoutes {
       const channelConnectionsCollection = GetChannelConnectionsCollection();
       const g = giveaway as GiveawayDoc;
       const publishIds =
-        d.publishChannelIds ?? (Array.isArray(giveaway.channelIds) ? giveaway.channelIds : [giveaway.channelId]);
+        d.publishChannelIds ??
+        (Array.isArray(giveaway.channelIds) ? giveaway.channelIds : [giveaway.channelId]);
       const requiredIds =
         d.participantChannelIds ?? (g.requiredChannels ?? []).map((c) => c.channelId);
       const allIds = [...new Set([...publishIds, ...requiredIds])];
@@ -730,7 +747,7 @@ export class ManageRoutes {
       });
     }
     if (Object.keys(setFields).length === 0) {
-      res.json({ ok: true, eventId: req.params.eventId });
+      res.json({ ok: true, eventId });
       return;
     }
     const result = await GetGiveawaysCollection().updateOne(
@@ -741,7 +758,7 @@ export class ManageRoutes {
       res.status(404).json({ error: 'not_found', message: 'розыгрыш не найден' });
       return;
     }
-    res.json({ ok: true, eventId: req.params.eventId });
+    res.json({ ok: true, eventId });
   };
 
   /**
@@ -749,7 +766,7 @@ export class ManageRoutes {
    */
   private _handleDeleteGiveaway = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    const eventId = req.params.eventId;
+    const eventId = getEventIdParam(req);
     if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
@@ -777,7 +794,7 @@ export class ManageRoutes {
    * Результат проверки ликвидности черновика перед запуском.
    */
   private async _validateGiveawayBeforeLaunch(
-    giveaway: GiveawayDoc
+    giveaway: GiveawayDoc,
   ): Promise<{ valid: boolean; errors: LaunchValidationError[] }> {
     const errors: LaunchValidationError[] = [];
     const publishChannelIds =
@@ -789,7 +806,7 @@ export class ManageRoutes {
       ...new Set([...publishChannelIds, ...requiredChannels.map((c) => c.channelId)]),
     ];
     const channelMap = new Map(
-      requiredChannels.map((c) => [c.channelId, { channelTitle: c.channelTitle ?? null }])
+      requiredChannels.map((c) => [c.channelId, { channelTitle: c.channelTitle ?? null }]),
     );
     if (channelMap.size < allChannelIds.length) {
       const connections = await GetChannelConnectionsCollection()
@@ -822,9 +839,7 @@ export class ManageRoutes {
         : giveaway.endsAt.getTime();
     if (endsAt <= Date.now()) {
       const endsAtIso =
-        typeof giveaway.endsAt === 'string'
-          ? giveaway.endsAt
-          : giveaway.endsAt.toISOString();
+        typeof giveaway.endsAt === 'string' ? giveaway.endsAt : giveaway.endsAt.toISOString();
       errors.push({ code: 'date_past', endsAt: endsAtIso });
     }
 
@@ -847,7 +862,7 @@ export class ManageRoutes {
    */
   private _handleLaunchReadiness = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    const eventId = req.params.eventId;
+    const eventId = getEventIdParam(req);
     if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
@@ -877,7 +892,7 @@ export class ManageRoutes {
    */
   private _handleLaunchGiveaway = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    const eventId = req.params.eventId;
+    const eventId = getEventIdParam(req);
     if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
@@ -934,7 +949,9 @@ export class ManageRoutes {
 
         // Перед публикацией проверяем, что у всех каналов в кнопках есть валидные ссылки
         const requiredChannels = (fresh as GiveawayDoc).requiredChannels ?? [];
-        const invalidLinkChannels = requiredChannels.filter((ch) => !_isValidJoinLink(ch.channelJoinLink));
+        const invalidLinkChannels = requiredChannels.filter(
+          (ch) => !_isValidJoinLink(ch.channelJoinLink),
+        );
         if (invalidLinkChannels.length > 0) {
           await GetGiveawaysCollection().updateOne(
             { _id: giveawayId, creatorId: userId, status: 'pending_start' },
@@ -990,11 +1007,14 @@ export class ManageRoutes {
         );
 
         // Уведомление организатора о запуске конкурса.
-        await this.bot.api.sendMessageToUser(userId, [
-          `Конкурс «${fresh.title}» запущен.`,
-          '',
-          `Анонс опубликован в ${sent.length} канал(ах).`,
-        ].join('\n'));
+        await this.bot.api.sendMessageToUser(
+          userId,
+          [
+            `Конкурс «${fresh.title}» запущен.`,
+            '',
+            `Анонс опубликован в ${sent.length} канал(ах).`,
+          ].join('\n'),
+        );
       } catch (err) {
         console.error('[manage.routes] failed to process delayed launch', err);
       }
@@ -1006,7 +1026,7 @@ export class ManageRoutes {
    */
   private _handleStopGiveaway = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    const eventId = req.params.eventId;
+    const eventId = getEventIdParam(req);
     if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
@@ -1058,7 +1078,7 @@ export class ManageRoutes {
    */
   private _handleFinishEarlyGiveaway = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    const eventId = req.params.eventId;
+    const eventId = getEventIdParam(req);
     if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
@@ -1140,9 +1160,7 @@ export class ManageRoutes {
         let winnersBlock = '';
         if (winnerUserIds.length > 0) {
           const usersCollection = GetUsersCollection();
-          const users = await usersCollection
-            .find({ uid: { $in: winnerUserIds } })
-            .toArray();
+          const users = await usersCollection.find({ uid: { $in: winnerUserIds } }).toArray();
           const byId = new Map<number, (typeof users)[number]>();
           for (const u of users) byId.set(u.uid, u);
 
@@ -1197,21 +1215,17 @@ export class ManageRoutes {
           .filter((x) => x !== '')
           .join('\n');
 
-        await this.bot.api.sendMessageToUser(
-          userId,
-          fullText,
-          {
-            format: 'markdown',
-            attachments: [
-              Keyboard.inlineKeyboard([
-                [
-                  // Должно совпадать со значением MAIN_MENU_ACTION_BACK в боте.
-                  Keyboard.button.callback('🏠 В меню', 'menu_back_to_main'),
-                ],
-              ]),
-            ],
-          } as never,
-        );
+        await this.bot.api.sendMessageToUser(userId, fullText, {
+          format: 'markdown',
+          attachments: [
+            Keyboard.inlineKeyboard([
+              [
+                // Должно совпадать со значением MAIN_MENU_ACTION_BACK в боте.
+                Keyboard.button.callback('🏠 В меню', 'menu_back_to_main'),
+              ],
+            ]),
+          ],
+        } as never);
       } catch (err) {
         console.error('[manage.routes] failed to process delayed finish', err);
       }
@@ -1224,7 +1238,7 @@ export class ManageRoutes {
    */
   private _handleRestartGiveaway = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    const eventId = req.params.eventId;
+    const eventId = getEventIdParam(req);
     if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
@@ -1292,7 +1306,7 @@ export class ManageRoutes {
    */
   private _handleFinishGiveaway = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    const eventId = req.params.eventId;
+    const eventId = getEventIdParam(req);
     if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
@@ -1315,9 +1329,7 @@ export class ManageRoutes {
     }
 
     const ticketsCollection = GetTicketsCollection();
-    const tickets = await ticketsCollection
-      .find({ giveawayId })
-      .toArray();
+    const tickets = await ticketsCollection.find({ giveawayId }).toArray();
 
     const winnerUserIds: number[] = [];
     const winnersCount = Math.min(giveaway.winnersCount, tickets.length);
@@ -1352,7 +1364,7 @@ export class ManageRoutes {
    */
   private _handleRefreshChannelLinks = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    const eventId = req.params.eventId;
+    const eventId = getEventIdParam(req);
     if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
@@ -1369,7 +1381,11 @@ export class ManageRoutes {
 
     const requiredChannels = giveaway.requiredChannels ?? [];
     const channelConnectionsCollection = GetChannelConnectionsCollection();
-    const updated: Array<{ channelId: number; channelTitle: string | null; channelJoinLink: string | null }> = [];
+    const updated: Array<{
+      channelId: number;
+      channelTitle: string | null;
+      channelJoinLink: string | null;
+    }> = [];
 
     for (const ch of requiredChannels) {
       const channelId = Number(ch.channelId);
@@ -1405,7 +1421,11 @@ export class ManageRoutes {
     const newRequiredChannels = requiredChannels.map((ch) => {
       const u = updated.find((x) => x.channelId === Number(ch.channelId));
       if (u) {
-        return { channelId: ch.channelId, channelTitle: u.channelTitle, channelJoinLink: u.channelJoinLink };
+        return {
+          channelId: ch.channelId,
+          channelTitle: u.channelTitle,
+          channelJoinLink: u.channelJoinLink,
+        };
       }
       return ch;
     });
@@ -1424,11 +1444,12 @@ export class ManageRoutes {
    */
   private _handleRepublish = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-    if (!ObjectId.isValid(req.params.eventId)) {
+    const eventId = getEventIdParam(req);
+    if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
     }
-    const giveawayId = new ObjectId(req.params.eventId);
+    const giveawayId = new ObjectId(eventId);
     const giveaway = await GetGiveawaysCollection().findOne({ _id: giveawayId, creatorId: userId });
     if (!giveaway) {
       res.status(404).json({ error: 'not_found', message: 'розыгрыш не найден' });
@@ -1528,7 +1549,7 @@ export class ManageRoutes {
           isPublic,
         },
       },
-      { upsert: true }
+      { upsert: true },
     );
 
     res.status(200).json({
@@ -1590,7 +1611,7 @@ export class ManageRoutes {
 
     await GetChannelConnectionsCollection().updateOne(
       { ownerId: userId, channelId, status: 'connected' },
-      { $set: updateSet }
+      { $set: updateSet },
     );
 
     res.json({
@@ -1714,8 +1735,9 @@ export class ManageRoutes {
     );
 
     try {
-      await (this.bot.api as { sendMessageToUser?: (userId: number, text: string) => Promise<unknown> })
-        .sendMessageToUser?.(userId, `Канал «${channelTitle}» успешно удалён.`);
+      await (
+        this.bot.api as { sendMessageToUser?: (userId: number, text: string) => Promise<unknown> }
+      ).sendMessageToUser?.(userId, `Канал «${channelTitle}» успешно удалён.`);
     } catch (err) {
       console.warn('[manage] sendMessageToUser after delete failed:', err);
     }

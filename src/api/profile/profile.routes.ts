@@ -6,6 +6,12 @@ import {
   GetTicketsCollection,
 } from '../../db/collections.js';
 
+function getEventIdParam(req: Request): string {
+  const value = (req.params as unknown as { eventId?: string | string[] }).eventId;
+  if (Array.isArray(value)) return value[0] ?? '';
+  return value ?? '';
+}
+
 /**
  * Роуты профиля участника розыгрышей.
  *
@@ -100,12 +106,12 @@ export class ProfileRoutes {
    */
   private _handleGetParticipation = async (req: Request, res: Response): Promise<void> => {
     const userId = req.user!.uid;
-
-    if (!ObjectId.isValid(req.params.eventId)) {
+    const eventId = getEventIdParam(req);
+    if (!ObjectId.isValid(eventId)) {
       res.status(400).json({ error: 'bad_event_id' });
       return;
     }
-    const giveawayId = new ObjectId(req.params.eventId);
+    const giveawayId = new ObjectId(eventId);
 
     // Проверяем что пользователь является участником этого розыгрыша
     const participation = await GetParticipantsCollection().findOne({ giveawayId, userId });
