@@ -12,12 +12,13 @@ import {
 import { GiveawayDoc } from '../../types/index.js';
 
 // Безопасно достаёт eventId из req.params, приводя к строке.
+// String() гарантирует тип string для строгой проверки TS (в т.ч. Railway).
 function getEventIdParam(req: Request): string {
   const value = (req.params as unknown as { eventId?: string | string[] }).eventId;
   if (Array.isArray(value)) {
-    return value[0] ?? '';
+    return String(value[0] ?? '');
   }
-  return value ?? '';
+  return String(value ?? '');
 }
 
 export type LaunchValidationError =

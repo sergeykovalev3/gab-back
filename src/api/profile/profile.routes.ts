@@ -8,8 +8,8 @@ import {
 
 function getEventIdParam(req: Request): string {
   const value = (req.params as unknown as { eventId?: string | string[] }).eventId;
-  if (Array.isArray(value)) return value[0] ?? '';
-  return value ?? '';
+  if (Array.isArray(value)) return String(value[0] ?? '');
+  return String(value ?? '');
 }
 
 /**
