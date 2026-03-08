@@ -39,8 +39,16 @@ export function loadConfig(): Config {
     .map((value) => value.trim())
     .filter(Boolean);
 
-  const mongoUri = process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017';
+  // Railway даёт MONGO_URL, локально можно использовать MONGODB_URI
+  const mongoUri = process.env.MONGO_URL ?? process.env.MONGODB_URI ?? 'mongodb://127.0.0.1:27017';
   const mongoDbName = process.env.MONGODB_DB ?? 'max_events_bot';
+
+  // В проде не подключаемся к localhost — там нет MongoDB
+  if (process.env.NODE_ENV === 'production' && mongoUri.includes('127.0.0.1')) {
+    throw new Error(
+      'В production задайте MONGO_URL или MONGODB_URI. Сейчас используется localhost.',
+    );
+  }
 
   const rawPublicUrl =
     process.env.PUBLIC_API_URL ?? process.env.BACKEND_API_URL ?? 'http://localhost:4000';
